@@ -1,0 +1,26 @@
+backup_to_json: true
+convert_dates: true
+custom_params:
+  company: Thaitours
+  source: Google Maps
+custom_url_base: https://mycustomurl.com
+custom_url_profiles: /profiles/
+custom_url_reviews: /reviews/
+download_images: true
+download_threads: 4
+headless: false
+image_dir: review_images7
+json_path: google_reviews7.json
+mongodb:
+  collection: google_reviews
+  database: reviews
+  uri: mongodb://localhost:27017
+overwrite_existing: false
+preserve_original_urls: true
+replace_urls: false
+seen_ids_path: google_reviews.ids
+sort_by: newest
+stop_on_match: false
+store_local_paths: true
+url: https://www.google.com/maps/place/Felipe's+Taqueria/@42.3734811,-71.1230693,659m/data=!3m1!1e3!4m8!3m7!1s0x405c5d42385d9621:0x5ad64dc86ab511e9!8m2!3d42.3734811!4d-71.1204944!9m1!1b1!16s%2Fg%2F11b760w80p?entry=ttu&g_ep=EgoyMDI1MDUxMS4wIKXMDSoASAFQAw%3D%3D
+use_mongodb: false

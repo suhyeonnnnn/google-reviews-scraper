@@ -17,19 +17,19 @@ DEFAULT_CONFIG_PATH = Path("config.yaml")
 
 # Default configuration - will be overridden by config file
 DEFAULT_CONFIG = {
-    "url": "https://maps.app.goo.gl/6tkNMDjcj3SS6LJe9",
+    "url": "https://www.google.com/maps/place//data=!4m4!3m3!1s0x89c25888bac5a51f:0xc6f812b99e2d60e1!9m1!1b1",
     "headless": True,
     "sort_by": "relevance",
     "stop_on_match": False,
     "overwrite_existing": False,
-    "use_mongodb": True,
+    "use_mongodb": False,
     "mongodb": {
         "uri": "mongodb://localhost:27017",
         "database": "reviews",
         "collection": "google_reviews"
     },
     "backup_to_json": True,
-    "json_path": "google_reviews.json",
+    "json_path": "google_reviews_2.json",
     "seen_ids_path": "google_reviews.ids",
     "convert_dates": True,
     "download_images": True,
@@ -38,8 +38,8 @@ DEFAULT_CONFIG = {
     "store_local_paths": True,  # Option to control storing local image paths
     "replace_urls": False,  # Option to control URL replacement
     "custom_url_base": "https://mycustomurl.com",  # Base URL for replacement
-    "custom_url_profiles": "/profiles/",  # Path for profile images
-    "custom_url_reviews": "/reviews/",  # Path for review images
+    "custom_url_profiles": "/profiles2/",  # Path for profile images
+    "custom_url_reviews": "/reviews2/",  # Path for review images
     "preserve_original_urls": True,  # Option to preserve original URLs
     "custom_params": {  # Custom parameters to add to each document
         "company": "Thaitours",  # Default example
