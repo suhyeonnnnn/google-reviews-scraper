@@ -1,24 +1,13 @@
 #!/usr/bin/env python3
 """
-Google Maps 리뷰 스크래퍼 - CSV 파일 일괄 처리
+Google Maps 리뷰 스크래퍼 - CSV 파일 일괄 처리 (개선된 재시도 로직 포함)
 ========================================
 
 CSV 파일에서 레스토랑 정보를 읽어 구글 맵스 리뷰를 일괄 스크랩합니다.
+meta.json과 reviews.json의 차이가 큰 경우 자동으로 재시도합니다.
 
 source venv/bin/activate
-python start.py --csv treat/restaurants_001.csv --base-dir treat/restaurants_001 --headless
-python start.py --csv treat/restaurants_006.csv --base-dir treat/restaurants_006 --headless
-"""
-#!/usr/bin/env python3
-"""
-Google Maps 리뷰 스크래퍼 - CSV 파일 일괄 처리
-========================================
-
-CSV 파일에서 레스토랑 정보를 읽어 구글 맵스 리뷰를 일괄 스크랩합니다.
-
-source venv/bin/activate
-python start.py --csv treat/restaurants_001.csv --base-dir treat/restaurants_001 --headless --skip-exists
-python start.py --csv treat/restaurants_006.csv --base-dir treat/restaurants_006 --headless --skip-exists
+python start.py --csv treat/restaurants_006.csv --base-dir treat/restaurants_006 --headless --skip-exists --retry-threshold 0.3
 """
 
 import os
@@ -62,51 +51,147 @@ def parse_args():
     parser.add_argument("--skip-exists", action="store_true", 
                         help="이미 처리한 레스토랑 건너뛰기 (폴더 존재 + reviews.json 존재 + 내용이 빈 리스트가 아닌 경우)")
     
+    parser.add_argument("--retry-threshold", type=float, default=0.3,
+                        help="재시도를 위한 차이 비율 임계값 (기본값: 0.3, 30%)")
+    
+    parser.add_argument("--max-retries", type=int, default=3,
+                        help="최대 재시도 횟수 (기본값: 3)")
+    
+    parser.add_argument("--retry-delay", type=int, default=5,
+                        help="재시도 사이의 대기 시간(초) (기본값: 5)")
+    
     return parser.parse_args()
 
-def should_skip_restaurant(base_dir):
+def check_review_quality(base_dir, retry_threshold=0.3):
     """
-    레스토랑을 건너뛸지 판단하는 함수
-    조건: 폴더 존재 + reviews.json 존재 + 파일 크기 > 10바이트 + 내용이 빈 리스트가 아님
+    리뷰 품질 검사 - meta.json과 reviews.json의 차이 분석
+    
+    Args:
+        base_dir: 레스토랑 데이터 디렉토리
+        retry_threshold: 재시도를 위한 차이 비율 임계값
+    
+    Returns:
+        tuple: (should_retry, reason, stats_dict)
     """
     try:
-        # 1. 폴더가 존재하는지 확인
+        reviews_path = base_dir / "reviews.json"
+        meta_path = base_dir / "meta.json"
+        
+        # 파일 존재 여부 확인
+        if not reviews_path.exists():
+            return True, "reviews.json 파일이 존재하지 않음", {}
+        
+        if not meta_path.exists():
+            return False, "meta.json 파일이 존재하지 않음 (정상적일 수 있음)", {}
+        
+        # 파일 읽기
+        with open(reviews_path, 'r', encoding='utf-8') as f:
+            reviews_data = json.load(f)
+        
+        with open(meta_path, 'r', encoding='utf-8') as f:
+            meta_data = json.load(f)
+        
+        # 데이터 분석
+        review_count = len(reviews_data) if isinstance(reviews_data, list) else 0
+        user_ratings_count = meta_data.get('userRatingCount', 0)
+        
+        # 통계 정보
+        stats = {
+            'review_count': review_count,
+            'user_ratings_count': user_ratings_count,
+            'difference': user_ratings_count - review_count,
+            'difference_ratio': 0
+        }
+        
+        # 차이 비율 계산 (0으로 나누기 방지)
+        if user_ratings_count > 0:
+            stats['difference_ratio'] = (user_ratings_count - review_count) / user_ratings_count
+        
+        # 재시도 조건 판단
+        should_retry = False
+        reason = f"리뷰 수: {review_count}, 총 평점 수: {user_ratings_count}"
+        
+        # 1. 리뷰가 하나도 없는 경우
+        if review_count == 0 and user_ratings_count > 0:
+            should_retry = True
+            reason += " - 리뷰가 하나도 수집되지 않음"
+        
+        # 2. 차이 비율이 임계값을 초과하는 경우
+        elif abs(stats['difference_ratio']) > retry_threshold and user_ratings_count > 10:
+            should_retry = True
+            reason += f" - 차이 비율 {stats['difference_ratio']:.2%} > 임계값 {retry_threshold:.2%}"
+        
+        # 3. 총 평점 수가 많은데 리뷰 수가 너무 적은 경우
+        elif user_ratings_count > 100 and review_count < 10:
+            should_retry = True
+            reason += " - 총 평점 수 대비 수집된 리뷰 수가 너무 적음"
+        
+        else:
+            reason += " - 정상 범위"
+        
+        return should_retry, reason, stats
+        
+    except json.JSONDecodeError as e:
+        return True, f"JSON 파일 파싱 오류: {e}", {}
+    except Exception as e:
+        return True, f"품질 검사 중 오류: {e}", {}
+
+def should_skip_restaurant(base_dir, retry_threshold=0.3):
+    """
+    레스토랑을 건너뛸지 판단하는 함수 (품질 검사 포함)
+    """
+    try:
+        # 1. 기본 파일 존재 확인
         if not base_dir.exists():
             return False, "폴더가 존재하지 않음"
         
-        # 2. reviews.json 파일이 존재하는지 확인
-        json_path = base_dir / "reviews.json"
-        if not json_path.exists():
+        reviews_path = base_dir / "reviews.json"
+        if not reviews_path.exists():
             return False, "reviews.json 파일이 존재하지 않음"
         
-        # 3. 파일 크기 확인 (최소 10바이트 이상)
-        if json_path.stat().st_size <= 10:
-            return False, f"reviews.json 파일이 너무 작음 ({json_path.stat().st_size} 바이트)"
+        # 2. 파일 크기 확인
+        if reviews_path.stat().st_size <= 10:
+            return False, f"reviews.json 파일이 너무 작음 ({reviews_path.stat().st_size} 바이트)"
         
-        # 4. 파일 내용 확인 (빈 리스트가 아닌지)
-        try:
-            with open(json_path, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-                
-            # JSON 파싱 시도
-            try:
-                data = json.loads(content)
-                if isinstance(data, list):
-                    if len(data) == 0:
-                        return False, "reviews.json이 빈 리스트임"
-                    else:
-                        return True, f"유효한 리뷰 데이터 {len(data)}개 존재"
-                else:
-                    # 리스트가 아닌 경우도 데이터가 있다고 판단
-                    return True, "유효한 데이터 존재 (리스트 형태 아님)"
-            except json.JSONDecodeError as e:
-                return False, f"JSON 파싱 오류: {e}"
-                
-        except Exception as e:
-            return False, f"파일 읽기 오류: {e}"
+        # 3. 품질 검사
+        should_retry, reason, stats = check_review_quality(base_dir, retry_threshold)
+        
+        if should_retry:
+            return False, f"품질 검사 실패: {reason}"
+        else:
+            return True, f"품질 검사 통과: {reason}"
             
     except Exception as e:
         return False, f"검사 중 오류: {e}"
+
+def analyze_existing_data(base_dir_path, retry_threshold=0.3):
+    """
+    기존 데이터를 분석하여 재시도가 필요한 레스토랑 목록 반환
+    """
+    retry_candidates = []
+    
+    if not os.path.exists(base_dir_path):
+        return retry_candidates
+    
+    log.info(f"기존 데이터 분석 중: {base_dir_path}")
+    
+    for folder_name in os.listdir(base_dir_path):
+        folder_path = Path(base_dir_path) / folder_name
+        if not folder_path.is_dir():
+            continue
+        
+        should_retry, reason, stats = check_review_quality(folder_path, retry_threshold)
+        
+        if should_retry:
+            retry_candidates.append({
+                'folder_name': folder_name,
+                'folder_path': folder_path,
+                'reason': reason,
+                'stats': stats
+            })
+            log.info(f"재시도 후보: {folder_name} - {reason}")
+    
+    return retry_candidates
 
 def load_restaurants_from_csv(csv_path):
     """CSV 파일에서 레스토랑 정보 불러오기"""
@@ -176,10 +261,9 @@ def create_config_for_restaurant(restaurant, args):
     # 특수문자 제거 및 폴더명 정리
     folder_name = "".join(c if c.isalnum() or c in [' ', '_', '-'] else '_' for c in folder_name)
     
-    # 구글맵스 URL 가져오기 (googleMapsUri 또는 placeUri)
+    # 구글맵스 URL 가져오기
     url = restaurant.get('googleMapsUri') or restaurant.get('placeUri')
     
-    # URL이 없는 경우 검색 URL 생성 시도
     if not url:
         name = restaurant.get('name', '')
         address = restaurant.get('formattedAddress', '') or restaurant.get('shortFormattedAddress', '')
@@ -191,11 +275,10 @@ def create_config_for_restaurant(restaurant, args):
             log.error(f"레스토랑 URL을 생성할 수 없습니다: {restaurant}")
             return None, None, None
     
-    # /data=!4m4!3m3!1s0... 부분 추가 (리뷰 페이지로 이동)
+    # 리뷰 페이지 URL 생성
     if "data=" not in url and "!9m1!1b1" not in url and "place" in url:
         place_id = restaurant.get('id', '')
         if place_id and place_id.strip() != "":
-            # URL에 리뷰 파라미터 추가
             if url.endswith('/'):
                 url = f"{url}data=!4m4!3m3!1s{place_id}!9m1!1b1"
             else:
@@ -234,10 +317,88 @@ def save_config(config, config_path):
         log.error(f"설정 파일 저장 중 오류: {e}")
         return False
 
+def scrape_restaurant_with_retry(restaurant, args, attempt_num, total_restaurants):
+    """
+    단일 레스토랑 스크래핑 (재시도 로직 포함)
+    """
+    restaurant_name = restaurant.get('displayName') or restaurant.get('name', 'Unknown')
+    log.info(f"[{attempt_num}/{total_restaurants}] 레스토랑 처리 중: {restaurant_name}")
+    
+    # 레스토랑 설정 생성
+    result = create_config_for_restaurant(restaurant, args)
+    if result is None:
+        log.warning(f"[{attempt_num}/{total_restaurants}] {restaurant_name}: 설정 생성 실패")
+        return False, "설정 생성 실패"
+    
+    config, base_dir, folder_name = result
+    
+    # 디렉토리 생성
+    os.makedirs(base_dir, exist_ok=True)
+    os.makedirs(Path(config["image_dir"]), exist_ok=True)
+    
+    # 기존 데이터 건너뛰기 검사
+    if args.skip_exists:
+        should_skip, reason = should_skip_restaurant(base_dir, args.retry_threshold)
+        if should_skip:
+            log.info(f"[{attempt_num}/{total_restaurants}] {restaurant_name}: {reason}, 건너뜀")
+            return True, "건너뜀"
+    
+    # 설정 파일 저장
+    config_path = base_dir / "config.yaml"
+    if not save_config(config, config_path):
+        log.error(f"[{attempt_num}/{total_restaurants}] {restaurant_name}: 설정 파일 저장 실패")
+        return False, "설정 파일 저장 실패"
+    
+    # 스크래핑 시도 (재시도 로직)
+    for retry_attempt in range(1, args.max_retries + 1):
+        if retry_attempt > 1:
+            log.info(f"[{attempt_num}/{total_restaurants}] {restaurant_name}: {retry_attempt}번째 재시도")
+            time.sleep(args.retry_delay)
+        
+        try:
+            # 스크래퍼 실행
+            scraper = GoogleReviewsScraper(config)
+            scraper.scrape()
+            
+            # 품질 검사
+            should_retry, reason, stats = check_review_quality(base_dir, args.retry_threshold)
+            
+            if not should_retry:
+                log.info(f"[{attempt_num}/{total_restaurants}] {restaurant_name}: 성공 - {reason}")
+                if stats:
+                    log.info(f"    └ 통계: 리뷰 {stats['review_count']}개, 총 평점 {stats['user_ratings_count']}개")
+                return True, "성공"
+            else:
+                if retry_attempt < args.max_retries:
+                    log.warning(f"[{attempt_num}/{total_restaurants}] {restaurant_name}: 품질 기준 미달 - {reason}")
+                    if stats:
+                        log.warning(f"    └ 통계: 리뷰 {stats['review_count']}개, 총 평점 {stats['user_ratings_count']}개, 차이율 {stats.get('difference_ratio', 0):.2%}")
+                else:
+                    log.error(f"[{attempt_num}/{total_restaurants}] {restaurant_name}: 최대 재시도 초과 - {reason}")
+                    return False, f"품질 기준 미달: {reason}"
+        
+        except Exception as e:
+            log.error(f"[{attempt_num}/{total_restaurants}] {restaurant_name}: 스크래핑 오류: {e}")
+            if retry_attempt >= args.max_retries:
+                import traceback
+                log.error(traceback.format_exc())
+                return False, f"스크래핑 오류: {e}"
+    
+    return False, "알 수 없는 오류"
+
 def main():
     """메인 함수"""
-    # 명령줄 인수 파싱
     args = parse_args()
+    
+    # 기존 데이터 분석 (재시도 필요한 항목 찾기)
+    if args.skip_exists:
+        retry_candidates = analyze_existing_data(args.base_dir, args.retry_threshold)
+        if retry_candidates:
+            log.warning(f"재시도가 필요한 기존 레스토랑 {len(retry_candidates)}개 발견:")
+            for candidate in retry_candidates[:5]:  # 처음 5개만 표시
+                log.warning(f"  - {candidate['folder_name']}: {candidate['reason']}")
+            if len(retry_candidates) > 5:
+                log.warning(f"  ... 외 {len(retry_candidates) - 5}개")
     
     # CSV 파일에서 레스토랑 정보 로드
     restaurants = load_restaurants_from_csv(args.csv)
@@ -251,30 +412,23 @@ def main():
         log.info(f"처리할 레스토랑 수를 {args.limit}개로 제한합니다.")
         restaurants = restaurants[:args.limit]
     
-    # skip-exists 옵션이 활성화된 경우 사전 검사
+    # 사전 필터링 (skip-exists)
     if args.skip_exists:
-        log.info("--skip-exists 옵션이 활성화되어 있습니다. 사전 검사를 진행합니다...")
         to_process = []
         skip_count = 0
         
         for restaurant in restaurants:
             restaurant_name = restaurant.get('displayName') or restaurant.get('name', 'Unknown')
-            
-            # 레스토랑 설정 생성 (폴더 경로 확인용)
             result = create_config_for_restaurant(restaurant, args)
             if result is None:
                 continue
             
             config, base_dir, folder_name = result
-            
-            # 건너뛸지 판단
-            should_skip, reason = should_skip_restaurant(base_dir)
+            should_skip, reason = should_skip_restaurant(base_dir, args.retry_threshold)
             
             if should_skip:
-                log.info(f"건너뜀: {restaurant_name} - {reason}")
                 skip_count += 1
             else:
-                log.info(f"처리 예정: {restaurant_name} - {reason}")
                 to_process.append(restaurant)
         
         log.info(f"사전 검사 완료 - 건너뜀: {skip_count}개, 처리 예정: {len(to_process)}개")
@@ -284,108 +438,56 @@ def main():
         log.info("처리할 레스토랑이 없습니다.")
         return
     
-    # 스크랩 실행 여부 확인
-    proceed = input(f"{len(restaurants)}개의 레스토랑을 스크랩할 준비가 되었습니다. 진행하시겠습니까? (y/n): ").strip().lower()
+    # 진행 확인
+    proceed = input(f"\n설정 요약:\n"
+                   f"  - 처리할 레스토랑: {len(restaurants)}개\n"
+                   f"  - 재시도 임계값: {args.retry_threshold:.1%}\n"
+                   f"  - 최대 재시도: {args.max_retries}회\n"
+                   f"  - 재시도 간격: {args.retry_delay}초\n"
+                   f"\n진행하시겠습니까? (y/n): ").strip().lower()
+    
     if proceed != 'y':
-        log.info("스크랩 작업을 취소합니다.")
+        log.info("작업을 취소합니다.")
         return
     
     # 기본 디렉토리 생성
     os.makedirs(args.base_dir, exist_ok=True)
     
-    # 처리 결과 요약
+    # 처리 결과 통계
     success = 0
     failed = 0
     skipped = 0
     
-    # 최대 재시도 횟수 설정
-    max_retries = 3
-    
     # 각 레스토랑 처리
     for i, restaurant in enumerate(restaurants):
-        restaurant_name = restaurant.get('displayName') or restaurant.get('name', 'Unknown')
-        log.info(f"[{i+1}/{len(restaurants)}] 레스토랑 처리 중: {restaurant_name}")
+        success_result, reason = scrape_restaurant_with_retry(restaurant, args, i+1, len(restaurants))
         
-        # 레스토랑 설정 생성
-        result = create_config_for_restaurant(restaurant, args)
-        if result is None:
-            log.warning(f"[{i+1}/{len(restaurants)}] {restaurant_name}: 설정 생성 실패, 건너뜁니다.")
+        if "건너뜀" in reason:
             skipped += 1
-            continue
-        
-        config, base_dir, folder_name = result
-        
-        # 디렉토리 생성
-        os.makedirs(base_dir, exist_ok=True)
-        os.makedirs(Path(config["image_dir"]), exist_ok=True)
-        
-        # 개선된 건너뛰기 로직 (사전 검사에서 걸러지지 않았다면 다시 한 번 확인)
-        if args.skip_exists:
-            should_skip, reason = should_skip_restaurant(base_dir)
-            if should_skip:
-                log.info(f"[{i+1}/{len(restaurants)}] {restaurant_name}: {reason}, 건너뜁니다.")
-                skipped += 1
-                continue
-        
-        # 설정 파일 저장
-        config_path = base_dir / "config.yaml"
-        if not save_config(config, config_path):
-            log.error(f"[{i+1}/{len(restaurants)}] {restaurant_name}: 설정 파일 저장 실패, 건너뜁니다.")
+        elif success_result:
+            success += 1
+        else:
             failed += 1
-            continue
         
-        # 스크래퍼 실행 (재시도 로직 추가)
-        for attempt in range(1, max_retries + 1):
-            if attempt > 1:
-                log.info(f"[{i+1}/{len(restaurants)}] {restaurant_name}: {attempt}번째 재시도 중...")
-            else:
-                log.info(f"[{i+1}/{len(restaurants)}] {restaurant_name}: 스크래퍼 실행 시작")
-            
-            try:
-                # 스크래퍼 초기화 및 실행
-                scraper = GoogleReviewsScraper(config)
-                success_scrape = scraper.scrape()
-                
-                # 스크래핑 성공 여부 검증 (개선된 로직 사용)
-                json_path = base_dir / "reviews.json"
-                should_skip, reason = should_skip_restaurant(base_dir)
-                
-                if should_skip:  # 성공적으로 데이터가 있다면
-                    log.info(f"[{i+1}/{len(restaurants)}] {restaurant_name}: 스크래핑 완료 및 검증 성공 - {reason} (시도 {attempt}/{max_retries})")
-                    success += 1
-                    break
-                elif attempt < max_retries:
-                    log.warning(f"[{i+1}/{len(restaurants)}] {restaurant_name}: 스크래핑 검증 실패 - {reason}, 재시도 예정 ({attempt}/{max_retries})")
-                    time.sleep(5)  # 재시도 전 대기
-                else:
-                    log.error(f"[{i+1}/{len(restaurants)}] {restaurant_name}: 최대 재시도 횟수 초과, 스크래핑 실패 - {reason}")
-                    failed += 1
-            except Exception as e:
-                log.error(f"[{i+1}/{len(restaurants)}] {restaurant_name}: 스크래핑 중 오류: {e}")
-                import traceback
-                log.error(traceback.format_exc())
-                
-                if attempt < max_retries:
-                    log.warning(f"[{i+1}/{len(restaurants)}] {restaurant_name}: 오류 발생, 재시도 예정 ({attempt}/{max_retries})")
-                    time.sleep(5)  # 재시도 전 대기
-                else:
-                    log.error(f"[{i+1}/{len(restaurants)}] {restaurant_name}: 최대 재시도 횟수 초과, 스크래핑 실패")
-                    failed += 1
-                    break
-        
-        # 레스토랑 사이에 약간의 딜레이 추가
+        # 레스토랑 간 딜레이
         if i < len(restaurants) - 1:
-            log.info("다음 레스토랑으로 넘어가기 전 5초 대기...")
-            time.sleep(5)
+            time.sleep(2)
     
-    # 결과 요약 출력
-    log.info("\n=== 처리 결과 요약 ===")
-    log.info(f"총 레스토랑 수: {len(restaurants)}")
-    log.info(f"스크래핑 성공: {success}")
-    log.info(f"스크래핑 실패: {failed}")
-    log.info(f"처리 건너뜀: {skipped}")
+    # 결과 요약
+    log.info(f"\n{'='*50}")
+    log.info("처리 결과 요약:")
+    log.info(f"  총 레스토랑 수: {len(restaurants)}")
+    log.info(f"  성공: {success}")
+    log.info(f"  실패: {failed}")
+    log.info(f"  건너뜀: {skipped}")
+    log.info(f"  성공률: {success/(len(restaurants)) * 100:.1f}%")
     
-    log.info("\n모든 레스토랑 처리 완료!")
+    # 재시도 통계 추가 분석
+    if success > 0:
+        log.info(f"\n품질 분석 완료. 재시도 임계값: {args.retry_threshold:.1%}")
+        log.info("상세한 분석을 위해서는 별도의 분석 스크립트를 실행하세요.")
     
+    log.info("\n모든 처리 완료!")
+
 if __name__ == "__main__":
     main()

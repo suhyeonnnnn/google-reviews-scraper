@@ -384,7 +384,7 @@ class GoogleReviewsScraper:
                     continue
 
                 # Try each element found with this selector
-                for element in elements:
+                for element in elements: 
                     attempts += 1
 
                     # First check if this is actually a reviews tab
@@ -1032,6 +1032,12 @@ class GoogleReviewsScraper:
         start_time = time.time()
 
         url = self.config.get("url")
+        
+        if "?" in url:
+            url += "&hl=en"
+        else:
+            url += "?hl=en"
+    
         headless = self.config.get("headless", True)
         sort_by = self.config.get("sort_by", "relevance")
         stop_on_match = self.config.get("stop_on_match", False)
